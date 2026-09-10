@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="it">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2D Animator Pro</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+    <div class="app-container">
+        <aside class="sidebar">
+            <div class="background-logo">
+                <img class="logo" src="../assets/img-logo/logo.png" alt="">
+            </div>
+
+
+            <div class="upload-group">
+                <h3>1. File Base (Obbligatori)</h3>
+                <label class="custom-file-upload">
+                    <input type="file" id="img" accept=".png,.jpg"> 📤 Carica Immagine (PNG)
+                </label>
+                <label class="custom-file-upload">
+                    <input type="file" id="cgg" accept=".csv,.cgg"> 📤 Carica Struttura (CGG)
+                </label>
+            </div>
+
+            <div class="upload-group">
+                <h3>2. Animazioni (CGS)</h3>
+                <label class="custom-file-upload">
+                    <input type="file" id="idle" accept=".csv,.cgs"> 🧍 Idle
+                </label>
+                <label class="custom-file-upload">
+                    <input type="file" id="atk" accept=".csv,.cgs"> ⚔️ Attack
+                </label>
+                <label class="custom-file-upload">
+                    <input type="file" id="move" accept=".csv,.cgs"> 🏃 Move
+                </label>
+            </div>
+
+            <div class="controls">
+                <button id="start" class="primary-btn">▶ AVVIA ANIMAZIONE</button>
+
+                <div class="manual-controls" style="display: flex; gap: 5px; margin-top: 10px;">
+                    <button id="prevFrame" class="secondary-btn" style="flex:1">⬅️</button>
+                    <button id="togglePause" class="secondary-btn" style="flex:2">⏸ PAUSA</button>
+                    <button id="nextFrame" class="secondary-btn" style="flex:1">➡️</button>
+                </div>
+
+                <div class="timeline-container">
+                    <div class="timeline-header">
+                        <label>Frame Timeline</label>
+                        <span id="frameCounter">0 / 0</span>
+                    </div>
+                    <input type="range" id="timeline" min="0" max="0" value="0">
+                </div>
+
+                <div class="select-wrapper">
+                    <label for="select">Azione Corrente:</label>
+                    <select id="select">
+                        <option value="idle">Idle</option>
+                        <option value="atk">Attack</option>
+                        <option value="move">Move</option>
+                    </select>
+                </div>
+
+                <!-- Bottone aggiornato per Soluzione 2 -->
+                <button id="downloadImage" class="primary-btn"
+                    style="margin-top: 10px; background: linear-gradient(135deg, #3b82f6, #2563eb);">
+                    🖼️ SALVA FRAME CON NOME...
+                </button>
+            </div>
+        </aside>
+
+        <main class="canvas-container">
+            <canvas id="cv"></canvas>
+        </main>
+    </div>
+    <script type="module" src="main.js"></script>
+</body>
+
+</html>
