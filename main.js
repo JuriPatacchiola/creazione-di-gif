@@ -1,225 +1,853 @@
 import { Parser } from './parser.js';
 import { Renderer } from './renderer.js';
 
+
+// ============================================================
+// ZOOM
+// ============================================================
+
 let ZOOM_LEVEL = 0.2;
 
+
+// ============================================================
+// STATO
+// ============================================================
+
 const state = {
-    sequences: { idle: [], atk: [], move: [] },
+
+    sequences: {
+        idle: [],
+        atk: [],
+        move: []
+    },
+
     framesDB: [],
+
     current: 'idle',
+
     frameIndex: 0,
+
     isPlaying: false,
+
     isPaused: false,
+
     lastTime: 0,
+
     ticks: 0,
-    currentFrameDuration: 0,
+
+    currentFrameDuration: 1,
+
     downloadCount: 1
 };
 
+
+// ============================================================
+// INIT RENDERER
+// ============================================================
+
 Renderer.init('cv');
 
-// --- ZOOM & PAN ---
-Renderer.canvas.addEventListener('wheel', (e) => {
-    e.preventDefault();
-    if (e.deltaY > 0) {
-        ZOOM_LEVEL = Math.max(0.02, ZOOM_LEVEL - 0.05);
-    } else {
-        ZOOM_LEVEL += 0.05;
-    }
-    if (state.isPlaying) renderCurrentFrame();
-});
 
-let isDragging = false;
-Renderer.canvas.addEventListener('mousedown', () => isDragging = true);
-window.addEventListener('mouseup', () => isDragging = false);
-window.addEventListener('mousemove', (e) => {
-    if (!isDragging) return;
-    Renderer.offsetX += e.movementX;
-    Renderer.offsetY += e.movementY;
-    if (state.isPlaying && state.isPaused) renderCurrentFrame();
-});
+// ============================================================
+// ELEMENTI UI
+// ============================================================
 
-// UI Elements
-const timeline = document.getElementById('timeline');
-const frameCounter = document.getElementById('frameCounter');
-const btnPause = document.getElementById('togglePause');
-const selectAnim = document.getElementById('select');
-const btnStart = document.getElementById('start');
-const btnImage = document.getElementById('downloadImage');
+const timeline =
+    document.getElementById('timeline');
 
-// Feedback caricamento file
-document.querySelectorAll('input[type="file"]').forEach(input => {
-    input.addEventListener('change', function () {
-        if (this.files.length > 0) {
-            this.parentElement.classList.add('loaded');
+const frameCounter =
+    document.getElementById('frameCounter');
+
+const btnPause =
+    document.getElementById('togglePause');
+
+const selectAnim =
+    document.getElementById('select');
+
+const btnStart =
+    document.getElementById('start');
+
+const btnImage =
+    document.getElementById('downloadImage');
+
+
+// ============================================================
+// ZOOM CON ROTELLA MOUSE
+// ============================================================
+
+Renderer.canvas.addEventListener(
+    'wheel',
+    (event) => {
+
+        event.preventDefault();
+
+
+        if (event.deltaY > 0) {
+
+            ZOOM_LEVEL =
+                Math.max(
+                    0.02,
+                    ZOOM_LEVEL - 0.05
+                );
+
+        } else {
+
+            ZOOM_LEVEL += 0.05;
         }
-    });
-});
 
-function renderCurrentFrame() {
-    const sequence = state.sequences[state.current];
-    if (!sequence || sequence.length === 0) return;
-
-    const frameData = sequence[state.frameIndex];
-    if (frameData) {
-        state.currentFrameDuration = frameData.duration || 1;
-        const pieces = state.framesDB[frameData.id];
 
         Renderer.scale = ZOOM_LEVEL;
-        Renderer.draw(pieces, frameData);
 
-        timeline.value = state.frameIndex;
-        frameCounter.innerText = `${state.frameIndex + 1} / ${sequence.length}`;
-    }
-}
 
-function updateTimelineUI() {
-    const sequence = state.sequences[state.current];
-    if (sequence && sequence.length > 0) {
-        timeline.max = sequence.length - 1;
-        timeline.value = state.frameIndex;
-        frameCounter.innerText = `${state.frameIndex + 1} / ${sequence.length}`;
-    }
-}
+        /*
+            Ridisegniamo sempre il frame corrente,
+            non solamente quando l'animazione è in play.
+        */
 
-function advanceFrame(direction) {
-    const sequence = state.sequences[state.current];
-    if (!sequence || sequence.length === 0) return;
-
-    state.frameIndex = (state.frameIndex + direction + sequence.length) % sequence.length;
-    state.ticks = 0;
-    renderCurrentFrame();
-}
-
-btnPause.onclick = () => {
-    if (!state.isPlaying) return;
-    state.isPaused = !state.isPaused;
-    btnPause.innerText = state.isPaused ? "▶ RIPRENDI" : "⏸ PAUSA";
-};
-
-document.getElementById('nextFrame').onclick = () => {
-    state.isPaused = true;
-    btnPause.innerText = "▶ RIPRENDI";
-    advanceFrame(1);
-};
-
-document.getElementById('prevFrame').onclick = () => {
-    state.isPaused = true;
-    btnPause.innerText = "▶ RIPRENDI";
-    advanceFrame(-1);
-};
-
-timeline.addEventListener('input', (e) => {
-    state.isPaused = true;
-    btnPause.innerText = "▶ RIPRENDI";
-    state.frameIndex = parseInt(e.target.value, 10);
-    state.ticks = 0;
-    renderCurrentFrame();
-});
-
-selectAnim.onchange = (e) => {
-    state.current = e.target.value;
-    state.frameIndex = 0;
-    state.ticks = 0;
-    if (state.isPlaying) {
-        updateTimelineUI();
         renderCurrentFrame();
     }
-};
+);
 
-btnStart.onclick = async () => {
-    const files = {
-        img: document.getElementById('img').files[0],
-        cgg: document.getElementById('cgg').files[0],
-        idle: document.getElementById('idle').files[0],
-        atk: document.getElementById('atk').files[0],
-        move: document.getElementById('move').files[0]
-    };
 
-    if (!files.img || !files.cgg) return alert("Carica almeno PNG e CGG!");
+// ============================================================
+// PAN
+// ============================================================
 
-    try {
-        await Renderer.loadImage(files.img);
-        state.framesDB = Parser.parseCGG(await files.cgg.text());
+let isDragging = false;
 
-        if (files.idle) state.sequences.idle = Parser.parseCGS(await files.idle.text());
-        if (files.atk) state.sequences.atk = Parser.parseCGS(await files.atk.text());
-        if (files.move) state.sequences.move = Parser.parseCGS(await files.move.text());
 
-        // --- RESET STATO ANIMAZIONE ---
-        state.isPlaying = true;
-        state.isPaused = false;
-        state.frameIndex = 0;
-        state.ticks = 0;
+Renderer.canvas.addEventListener(
+    'mousedown',
+    () => {
 
-        // --- RESET CONTATORE DOWNLOAD ---
-        // Ogni volta che carichi nuovi file, il conteggio riparte da 1
-        state.downloadCount = 1;
-
-        btnPause.innerText = "⏸ PAUSA";
-        Renderer.offsetX = 0;
-        Renderer.offsetY = 0;
-
-        updateTimelineUI();
-        renderCurrentFrame();
-
-        if (state.lastTime === 0) requestAnimationFrame(gameLoop);
-    } catch (err) { alert("Errore nel caricamento file."); }
-};
-
-// --- ESPORTAZIONE IMMAGINE CON NOME INCREMENTALE ---
-btnImage.onclick = async () => {
-    const sequence = state.sequences[state.current];
-    if (!state.isPlaying || !sequence || sequence.length === 0) {
-        return alert("Avvia l'animazione prima di scaricare il frame!");
+        isDragging = true;
     }
+);
 
-    if (!window.showSaveFilePicker) {
-        alert("Il tuo browser non supporta questa funzione. Usa Chrome o Edge.");
+
+window.addEventListener(
+    'mouseup',
+    () => {
+
+        isDragging = false;
+    }
+);
+
+
+window.addEventListener(
+    'mousemove',
+    (event) => {
+
+        if (!isDragging) {
+            return;
+        }
+
+
+        Renderer.offsetX +=
+            event.movementX;
+
+        Renderer.offsetY +=
+            event.movementY;
+
+
+        renderCurrentFrame();
+    }
+);
+
+
+// ============================================================
+// FEEDBACK CARICAMENTO FILE
+// ============================================================
+
+document
+    .querySelectorAll('input[type="file"]')
+    .forEach(input => {
+
+        input.addEventListener(
+            'change',
+            function () {
+
+                if (this.files.length > 0) {
+
+                    this.parentElement
+                        .classList
+                        .add('loaded');
+                }
+            }
+        );
+    });
+
+
+// ============================================================
+// RENDER FRAME CORRENTE
+// ============================================================
+
+function renderCurrentFrame() {
+
+    const sequence =
+        state.sequences[state.current];
+
+
+    if (
+        !sequence ||
+        sequence.length === 0
+    ) {
         return;
     }
 
-    try {
-        const blob = await new Promise(resolve => Renderer.canvas.toBlob(resolve, 'image/png'));
 
-        const suggestedFileName = `download${state.downloadCount}.png`;
+    const frameData =
+        sequence[state.frameIndex];
 
-        const handle = await window.showSaveFilePicker({
-            suggestedName: suggestedFileName,
-            types: [{
-                description: 'Immagine PNG',
-                accept: { 'image/png': ['.png'] },
-            }],
-        });
 
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
+    if (!frameData) {
+        return;
+    }
 
-        state.downloadCount++;
 
-    } catch (err) {
-        if (err.name !== 'AbortError') {
-            console.error("Errore:", err);
-            alert("Errore durante il salvataggio.");
-        }
+    // Durata frame
+
+    state.currentFrameDuration =
+        frameData.duration || 1;
+
+
+    // Recuperiamo il frame CGG
+
+    const pieces =
+        state.framesDB[frameData.id];
+
+
+    if (!pieces) {
+        return;
+    }
+
+
+    // Zoom
+
+    Renderer.scale =
+        ZOOM_LEVEL;
+
+
+    // Disegno
+
+    Renderer.draw(
+        pieces,
+        frameData
+    );
+
+
+    // Timeline
+
+    timeline.value =
+        state.frameIndex;
+
+
+    // Contatore
+
+    frameCounter.innerText =
+        `${state.frameIndex + 1} / ${sequence.length}`;
+}
+
+
+// ============================================================
+// AGGIORNA TIMELINE
+// ============================================================
+
+function updateTimelineUI() {
+
+    const sequence =
+        state.sequences[state.current];
+
+
+    if (
+        !sequence ||
+        sequence.length === 0
+    ) {
+        return;
+    }
+
+
+    timeline.max =
+        sequence.length - 1;
+
+
+    timeline.value =
+        state.frameIndex;
+
+
+    frameCounter.innerText =
+        `${state.frameIndex + 1} / ${sequence.length}`;
+}
+
+
+// ============================================================
+// CAMBIO FRAME
+// ============================================================
+
+function advanceFrame(direction) {
+
+    const sequence =
+        state.sequences[state.current];
+
+
+    if (
+        !sequence ||
+        sequence.length === 0
+    ) {
+        return;
+    }
+
+
+    state.frameIndex =
+        (
+            state.frameIndex +
+            direction +
+            sequence.length
+        ) % sequence.length;
+
+
+    state.ticks = 0;
+
+
+    renderCurrentFrame();
+}
+
+
+// ============================================================
+// PAUSA / RIPRENDI
+// ============================================================
+
+btnPause.onclick = () => {
+
+    if (!state.isPlaying) {
+        return;
+    }
+
+
+    state.isPaused =
+        !state.isPaused;
+
+
+    if (state.isPaused) {
+
+        btnPause.innerText =
+            "▶ RIPRENDI";
+
+    } else {
+
+        btnPause.innerText =
+            "⏸ PAUSA";
+
+
+        /*
+            Evita uno scatto quando riprendiamo
+            l'animazione.
+        */
+
+        state.lastTime =
+            performance.now();
     }
 };
 
+
+// ============================================================
+// FRAME SUCCESSIVO
+// ============================================================
+
+document
+    .getElementById('nextFrame')
+    .onclick = () => {
+
+        state.isPaused = true;
+
+        btnPause.innerText =
+            "▶ RIPRENDI";
+
+        advanceFrame(1);
+    };
+
+
+// ============================================================
+// FRAME PRECEDENTE
+// ============================================================
+
+document
+    .getElementById('prevFrame')
+    .onclick = () => {
+
+        state.isPaused = true;
+
+        btnPause.innerText =
+            "▶ RIPRENDI";
+
+        advanceFrame(-1);
+    };
+
+
+// ============================================================
+// TIMELINE
+// ============================================================
+
+timeline.addEventListener(
+    'input',
+    (event) => {
+
+        state.isPaused = true;
+
+        btnPause.innerText =
+            "▶ RIPRENDI";
+
+
+        state.frameIndex =
+            parseInt(
+                event.target.value,
+                10
+            );
+
+
+        state.ticks = 0;
+
+
+        renderCurrentFrame();
+    }
+);
+
+
+// ============================================================
+// CAMBIO ANIMAZIONE
+// ============================================================
+
+selectAnim.onchange =
+    (event) => {
+
+        state.current =
+            event.target.value;
+
+
+        state.frameIndex = 0;
+
+        state.ticks = 0;
+
+
+        if (state.isPlaying) {
+
+            updateTimelineUI();
+
+            renderCurrentFrame();
+        }
+    };
+
+
+// ============================================================
+// START
+// ============================================================
+
+btnStart.onclick = async () => {
+
+    const files = {
+
+        img:
+            document
+                .getElementById('img')
+                .files[0],
+
+        cgg:
+            document
+                .getElementById('cgg')
+                .files[0],
+
+        idle:
+            document
+                .getElementById('idle')
+                .files[0],
+
+        atk:
+            document
+                .getElementById('atk')
+                .files[0],
+
+        move:
+            document
+                .getElementById('move')
+                .files[0]
+    };
+
+
+    // ========================================================
+    // CONTROLLO FILE
+    // ========================================================
+
+    if (!files.img || !files.cgg) {
+
+        alert(
+            "Carica almeno PNG e CGG!"
+        );
+
+        return;
+    }
+
+
+    try {
+
+        // ====================================================
+        // CARICAMENTO PNG
+        // ====================================================
+
+        await Renderer.loadImage(
+            files.img
+        );
+
+
+        // ====================================================
+        // PARSING CGG
+        // ====================================================
+
+        state.framesDB =
+            Parser.parseCGG(
+                await files.cgg.text()
+            );
+
+
+        // ====================================================
+        // PARSING IDLE
+        // ====================================================
+
+        if (files.idle) {
+
+            state.sequences.idle =
+                Parser.parseCGS(
+                    await files.idle.text()
+                );
+        } else {
+
+            state.sequences.idle = [];
+        }
+
+
+        // ====================================================
+        // PARSING ATK
+        // ====================================================
+
+        if (files.atk) {
+
+            state.sequences.atk =
+                Parser.parseCGS(
+                    await files.atk.text()
+                );
+        } else {
+
+            state.sequences.atk = [];
+        }
+
+
+        // ====================================================
+        // PARSING MOVE
+        // ====================================================
+
+        if (files.move) {
+
+            state.sequences.move =
+                Parser.parseCGS(
+                    await files.move.text()
+                );
+        } else {
+
+            state.sequences.move = [];
+        }
+
+
+        // ====================================================
+        // RESET ANIMAZIONE
+        // ====================================================
+
+        state.isPlaying = true;
+
+        state.isPaused = false;
+
+        state.frameIndex = 0;
+
+        state.ticks = 0;
+
+        state.lastTime =
+            performance.now();
+
+
+        // ====================================================
+        // RESET DOWNLOAD
+        // ====================================================
+
+        state.downloadCount = 1;
+
+
+        // ====================================================
+        // RESET UI
+        // ====================================================
+
+        btnPause.innerText =
+            "⏸ PAUSA";
+
+
+        // ====================================================
+        // RESET PAN
+        // ====================================================
+
+        Renderer.offsetX = 0;
+
+        Renderer.offsetY = 0;
+
+
+        // ====================================================
+        // RESET ZOOM
+        // ====================================================
+
+        ZOOM_LEVEL = 0.2;
+
+        Renderer.scale =
+            ZOOM_LEVEL;
+
+
+        // ====================================================
+        // PRIMO FRAME
+        // ====================================================
+
+        updateTimelineUI();
+
+        renderCurrentFrame();
+
+
+        // ====================================================
+        // AVVIO GAME LOOP
+        // ====================================================
+
+        requestAnimationFrame(
+            gameLoop
+        );
+
+
+    } catch (error) {
+
+        console.error(
+            "Errore:",
+            error
+        );
+
+
+        alert(
+            "Errore nel caricamento dei file."
+        );
+    }
+};
+
+
+// ============================================================
+// DOWNLOAD FRAME
+// ============================================================
+
+btnImage.onclick = async () => {
+
+    const sequence =
+        state.sequences[state.current];
+
+
+    if (
+        !state.isPlaying ||
+        !sequence ||
+        sequence.length === 0
+    ) {
+
+        alert(
+            "Avvia l'animazione prima di scaricare il frame!"
+        );
+
+        return;
+    }
+
+
+    // ========================================================
+    // CONTROLLO SUPPORTO BROWSER
+    // ========================================================
+
+    if (!window.showSaveFilePicker) {
+
+        alert(
+            "Il tuo browser non supporta questa funzione. Usa Chrome o Edge."
+        );
+
+        return;
+    }
+
+
+    try {
+
+        // ====================================================
+        // CREAZIONE PNG
+        // ====================================================
+
+        const blob =
+            await new Promise(
+                resolve => {
+
+                    Renderer.canvas.toBlob(
+                        resolve,
+                        'image/png'
+                    );
+                }
+            );
+
+
+        if (!blob) {
+
+            throw new Error(
+                "Impossibile creare il PNG."
+            );
+        }
+
+
+        // ====================================================
+        // NOME FILE
+        // ====================================================
+
+        const suggestedFileName =
+            `download${state.downloadCount}.png`;
+
+
+        // ====================================================
+        // SAVE FILE PICKER
+        // ====================================================
+
+        const handle =
+            await window.showSaveFilePicker({
+
+                suggestedName:
+                    suggestedFileName,
+
+                types: [
+
+                    {
+                        description:
+                            'Immagine PNG',
+
+                        accept: {
+                            'image/png':
+                                ['.png']
+                        }
+                    }
+                ]
+            });
+
+
+        // ====================================================
+        // SCRITTURA
+        // ====================================================
+
+        const writable =
+            await handle.createWritable();
+
+
+        await writable.write(blob);
+
+        await writable.close();
+
+
+        // ====================================================
+        // INCREMENTO
+        // ====================================================
+
+        state.downloadCount++;
+
+    } catch (error) {
+
+        if (
+            error.name ===
+            'AbortError'
+        ) {
+            return;
+        }
+
+
+        console.error(
+            "Errore:",
+            error
+        );
+
+
+        alert(
+            "Errore durante il salvataggio."
+        );
+    }
+};
+
+
+// ============================================================
+// GAME LOOP
+// ============================================================
+
 function gameLoop(timestamp) {
-    if (state.isPlaying && !state.isPaused) {
-        if (timestamp - state.lastTime >= 1000 / 60) {
-            const sequence = state.sequences[state.current];
-            if (sequence && sequence.length > 0) {
-                if (state.ticks >= state.currentFrameDuration) {
+
+    if (
+        state.isPlaying &&
+        !state.isPaused
+    ) {
+
+        /*
+            60 FPS.
+        */
+
+        const frameTime =
+            1000 / 60;
+
+
+        if (
+            timestamp -
+            state.lastTime >=
+            frameTime
+        ) {
+
+            const sequence =
+                state.sequences[state.current];
+
+
+            if (
+                sequence &&
+                sequence.length > 0
+            ) {
+
+                /*
+                    Quando abbiamo raggiunto la durata
+                    prevista dal CGS passiamo al frame
+                    successivo.
+                */
+
+                if (
+                    state.ticks >=
+                    state.currentFrameDuration
+                ) {
+
                     state.ticks = 0;
-                    state.frameIndex = (state.frameIndex + 1) % sequence.length;
+
+
+                    state.frameIndex =
+                        (
+                            state.frameIndex +
+                            1
+                        ) % sequence.length;
+
+
                     renderCurrentFrame();
                 }
+
+
                 state.ticks++;
             }
-            state.lastTime = timestamp;
+
+
+            state.lastTime =
+                timestamp;
         }
     }
-    requestAnimationFrame(gameLoop);
+
+
+    requestAnimationFrame(
+        gameLoop
+    );
 }
