@@ -10,6 +10,12 @@ export const Renderer = {
     offsetX: 0,
     offsetY: 0,
 
+    // pixel reali per pixel CSS (schermi con scala 125%, 150%, ...)
+    dpr: 1,
+
+    // chiamata dopo ogni ridimensionamento (il canvas si svuota da solo)
+    onResize: null,
+
 
     // =========================================================
     // INIT
@@ -55,19 +61,39 @@ export const Renderer = {
             return;
         }
 
-        this.canvas.width = parent.clientWidth;
-        this.canvas.height = parent.clientHeight;
+        /*
+            Il canvas deve avere ESATTAMENTE i pixel con cui viene mostrato.
 
-        if (this.ctx) {
+            Prima la dimensione era quella del contenitore compreso il
+            padding (20 px per lato): il CSS (max-width / max-height: 100%)
+            lo rimpiccioliva di circa il 4-6% e, con
+            "image-rendering: pixelated", il browser buttava via una
+            colonna e una riga di pixel ogni tanto. Muovendosi, i pezzi
+            sembravano saltare di un pixel: e' uno degli scatti.
+        */
 
-            this.ctx.imageSmoothingEnabled = false;
+        const css = getComputedStyle(parent);
 
-            /*
-                Pixel art:
-                evitiamo qualsiasi interpolazione.
-            */
+        const cssWidth =
+            parent.clientWidth -
+            parseFloat(css.paddingLeft) -
+            parseFloat(css.paddingRight);
 
-            this.ctx.imageSmoothingEnabled = false;
+        const cssHeight =
+            parent.clientHeight -
+            parseFloat(css.paddingTop) -
+            parseFloat(css.paddingBottom);
+
+        this.dpr = window.devicePixelRatio || 1;
+
+        this.canvas.style.width = Math.max(1, Math.floor(cssWidth)) + 'px';
+        this.canvas.style.height = Math.max(1, Math.floor(cssHeight)) + 'px';
+
+        this.canvas.width = Math.max(1, Math.round(Math.floor(cssWidth) * this.dpr));
+        this.canvas.height = Math.max(1, Math.round(Math.floor(cssHeight) * this.dpr));
+
+        if (this.onResize) {
+            this.onResize();
         }
     },
 
@@ -113,7 +139,7 @@ export const Renderer = {
 
 
     // =========================================================
-    // DRAW
+    // DRAW (sullo schermo, con zoom e pan)
     // =========================================================
 
     draw(
@@ -129,10 +155,6 @@ export const Renderer = {
         }
 
 
-        // -----------------------------------------------------
-        // PULIZIA CANVAS
-        // -----------------------------------------------------
-
         this.ctx.clearRect(
             0,
             0,
@@ -146,16 +168,8 @@ export const Renderer = {
         }
 
 
-        // -----------------------------------------------------
-        // SALVIAMO LO STATO DEL CANVAS
-        // -----------------------------------------------------
-
         this.ctx.save();
 
-
-        // -----------------------------------------------------
-        // CENTRO DEL PERSONAGGIO
-        // -----------------------------------------------------
 
         const centerX =
             this.canvas.width / 2;
@@ -165,35 +179,61 @@ export const Renderer = {
 
 
         this.ctx.translate(
-            centerX + this.offsetX,
-            centerY + this.offsetY
+            centerX + this.offsetX * this.dpr,
+            centerY + this.offsetY * this.dpr
         );
 
-
-        // -----------------------------------------------------
-        // ZOOM
-        // -----------------------------------------------------
-
+        // lo zoom e' in pixel CSS: moltiplico per i pixel reali dello schermo
         this.ctx.scale(
-            this.scale,
-            this.scale
+            this.scale * this.dpr,
+            this.scale * this.dpr
         );
 
 
-        // -----------------------------------------------------
-        // OFFSET GENERALE DEL CGS
-        // -----------------------------------------------------
+        /*
+            Pixel art ingrandita (zoom >= 1): nessuna interpolazione,
+            pixel netti.
 
-        const frameOffsetX =
-            Number(cgsFrame.xOffset) || 0;
+            Rimpicciolita (zoom < 1): con "nearest" i pezzi che si
+            muovono di frazioni di pixel saltano di un pixel intero
+            alla volta e tremolano. Qui serve l'interpolazione.
+        */
 
-        const frameOffsetY =
-            Number(cgsFrame.yOffset) || 0;
+        this.ctx.imageSmoothingEnabled =
+            this.scale * this.dpr < 1;
+
+        this.ctx.imageSmoothingQuality =
+            'high';
 
 
-        // =====================================================
-        // DISEGNO DEI PEZZI
-        // =====================================================
+        this.drawPieces(
+            this.ctx,
+            pieces,
+            Number(cgsFrame.xOffset) || 0,
+            Number(cgsFrame.yOffset) || 0
+        );
+
+
+        this.ctx.restore();
+    },
+
+
+    // =========================================================
+    // DISEGNO DEI PEZZI SU UN CONTESTO QUALSIASI
+    // (usato sia dallo schermo sia dall'esportazione GIF)
+    // =========================================================
+
+    drawPieces(
+        ctx,
+        pieces,
+        frameOffsetX = 0,
+        frameOffsetY = 0
+    ) {
+
+        if (!this.image || !pieces) {
+            return;
+        }
+
 
         /*
             I pezzi vengono disegnati dal fondo verso
@@ -220,11 +260,7 @@ export const Renderer = {
             }
 
 
-            // -------------------------------------------------
-            // SALVIAMO LO STATO DEL SINGOLO PEZZO
-            // -------------------------------------------------
-
-            this.ctx.save();
+            ctx.save();
 
 
             // -------------------------------------------------
@@ -236,7 +272,7 @@ export const Renderer = {
                     ? piece.opacity
                     : 100;
 
-            this.ctx.globalAlpha =
+            ctx.globalAlpha =
                 Math.max(
                     0,
                     Math.min(
@@ -252,12 +288,12 @@ export const Renderer = {
 
             if (piece.blendMode === 1) {
 
-                this.ctx.globalCompositeOperation =
+                ctx.globalCompositeOperation =
                     'lighter';
 
             } else {
 
-                this.ctx.globalCompositeOperation =
+                ctx.globalCompositeOperation =
                     'source-over';
             }
 
@@ -277,10 +313,8 @@ export const Renderer = {
 
             /*
                 Il pezzo viene posizionato usando il suo
-                centro come pivot.
-
-                Questo è importante perché flip e rotazione
-                devono avvenire attorno allo stesso punto.
+                centro come pivot: flip e rotazione avvengono
+                attorno allo stesso punto.
             */
 
             const pivotX =
@@ -290,7 +324,7 @@ export const Renderer = {
                 y + (piece.h / 2);
 
 
-            this.ctx.translate(
+            ctx.translate(
                 pivotX,
                 pivotY
             );
@@ -303,94 +337,22 @@ export const Renderer = {
             const flipType =
                 Number(piece.flipType) || 0;
 
+            const scaleX =
+                (flipType === 1 || flipType === 3) ? -1 : 1;
 
-            let scaleX = 1;
-            let scaleY = 1;
-
-
-            switch (flipType) {
-
-                case 0:
-
-                    // Nessun flip
-
-                    scaleX = 1;
-                    scaleY = 1;
-
-                    break;
+            const scaleY =
+                (flipType === 2 || flipType === 3) ? -1 : 1;
 
 
-                case 1:
-
-                    // Flip X
-
-                    scaleX = -1;
-                    scaleY = 1;
-
-                    break;
-
-
-                case 2:
-
-                    // Flip Y
-
-                    scaleX = 1;
-                    scaleY = -1;
-
-                    break;
-
-
-                case 3:
-
-                    /*
-                        Flip X + Y.
-
-                        Equivale alla combinazione
-                        dei due flip.
-                    */
-
-                    scaleX = -1;
-                    scaleY = -1;
-
-                    break;
-
-
-                default:
-
-                    scaleX = 1;
-                    scaleY = 1;
-
-                    break;
-            }
-
-
-            this.ctx.scale(
+            ctx.scale(
                 scaleX,
                 scaleY
             );
 
 
             // =================================================
-            // ROTAZIONE
+            // ROTAZIONE (segno negativo, come nel tuo CGG)
             // =================================================
-
-            /*
-                IMPORTANTE:
-
-                I valori di rotazione del CGG di Brave Frontier
-                devono essere interpretati con segno NEGATIVO.
-
-                Prima avevi:
-
-                    rotate(+p.rotate)
-
-                che provoca soprattutto problemi con le
-                parti che hanno flipType 1/2/3.
-
-                Ora:
-
-                    rotate(-p.rotate)
-            */
 
             const rotation =
                 Number(piece.rotate) || 0;
@@ -398,7 +360,7 @@ export const Renderer = {
 
             if (rotation !== 0) {
 
-                this.ctx.rotate(
+                ctx.rotate(
                     -rotation * Math.PI / 180
                 );
             }
@@ -408,7 +370,7 @@ export const Renderer = {
             // DRAW IMAGE
             // =================================================
 
-            this.ctx.drawImage(
+            ctx.drawImage(
 
                 this.image,
 
@@ -426,18 +388,77 @@ export const Renderer = {
             );
 
 
-            // -------------------------------------------------
-            // RIPRISTINIAMO LO STATO DEL PEZZO
-            // -------------------------------------------------
+            ctx.restore();
+        }
+    },
 
-            this.ctx.restore();
+
+    // =========================================================
+    // IMMAGINE INTERA DI UN FRAME (per GIF)
+    //
+    // box = area fissa che contiene tutta l'animazione {x,y,w,h}:
+    // e' uguale per tutti i frame, quindi non c'e' nessuno
+    // "spostamento" dovuto al ritaglio.
+    // bg = "#rrggbb" oppure null per lo sfondo trasparente.
+    // =========================================================
+
+    renderToCanvas(
+        pieces,
+        box,
+        scale = 1,
+        bg = null,
+        target = null
+    ) {
+
+        const width =
+            Math.max(1, Math.round(box.w * scale));
+
+        const height =
+            Math.max(1, Math.round(box.h * scale));
+
+
+        const canvas =
+            target || document.createElement('canvas');
+
+        canvas.width = width;
+        canvas.height = height;
+
+
+        const ctx =
+            canvas.getContext(
+                '2d',
+                { willReadFrequently: true }
+            );
+
+
+        ctx.clearRect(0, 0, width, height);
+
+
+        if (bg) {
+
+            ctx.fillStyle = bg;
+
+            ctx.fillRect(0, 0, width, height);
         }
 
 
-        // -----------------------------------------------------
-        // RIPRISTINIAMO LO STATO GENERALE
-        // -----------------------------------------------------
+        ctx.save();
 
-        this.ctx.restore();
+        ctx.scale(scale, scale);
+
+        ctx.translate(-box.x, -box.y);
+
+        // pixel netti: nell'esportazione non voglio sfocature
+        // ingrandito: pixel netti; rimpicciolito: serve l'interpolazione
+        ctx.imageSmoothingEnabled = scale < 1;
+
+        ctx.imageSmoothingQuality = 'high';
+
+        this.drawPieces(ctx, pieces, 0, 0);
+
+        ctx.restore();
+
+
+        return canvas;
     }
 };
