@@ -1,6 +1,8 @@
-import { encodeAPNG, encodeZip } from './apng.js';
-import { encodeGIF } from './gif.js';
+import { createAPNGWriter, createZipWriter } from './apng.js';
+import { initAssembler } from './assembler.js';
+import { createGifWriter, createPaletteBuilder } from './gif.js';
 import { Parser } from './parser.js';
+import { createMovWriter, createProResEncoder } from './prores.js';
 import { Renderer } from './renderer.js';
 import {
     TICK_MS,
@@ -155,6 +157,9 @@ const btnVideo =
 
 const btnZip =
     document.getElementById('downloadZip');
+
+const btnMov =
+    document.getElementById('downloadMov');
 
 document.getElementById('resetView').onclick = () => {
 
@@ -1569,14 +1574,24 @@ function exportBox(shifts) {
 }
 
 /*
+    ESPORTAZIONE "A FLUSSO"
+
+    Prima tutti i fotogrammi (pixel grezzi, 4 byte per pixel) restavano
+    in memoria fino alla fine: con animazioni lunghe o ingrandite si
+    arrivava a gigabyte e il browser dava "Out of memory".
+
+    Ora: si calcola solo il PIANO (area, numero di fotogrammi, tempi),
+    poi ogni fotogramma viene disegnato, passato subito all'encoder
+    (che lo comprime) e buttato. In memoria c'e' un solo fotogramma
+    grezzo alla volta, qualunque sia la lunghezza dell'animazione.
+
     mode:
       'gif'      colori sopra lo sfondo scelto (GIF opaca)
       'gif-mask' come sopra + maschera 1 bit (GIF con sfondo trasparente)
-      'alpha'    trasparenza vera (APNG)
-      'png'      come 'alpha', ma ogni fotogramma e' un PNG (per lo ZIP)
+      'alpha'    trasparenza vera (APNG / video trasparente)
 */
 
-async function renderExportFrames({ fps, scale, mode, bg, onStatus }) {
+function exportPlan(scale) {
 
     const sequence = state.sequences[state.current];
 
@@ -1584,9 +1599,12 @@ async function renderExportFrames({ fps, scale, mode, bg, onStatus }) {
 
     const box = exportBox(shifts);
 
-    if (Math.max(box.w, box.h) * scale > 4096) {
+    const width = Math.max(1, Math.round(box.w * scale));
+    const height = Math.max(1, Math.round(box.h * scale));
 
-        throw new Error(`L'area e' troppo grande (${Math.round(box.w * scale)}×${Math.round(box.h * scale)} px, massimo 4096). Aumenta lo zoom, riduci l'area o l'ingrandimento.`);
+    if (Math.max(width, height) > 4096) {
+
+        throw new Error(`L'area e' troppo grande (${width}×${height} px, massimo 4096). Aumenta lo zoom, riduci l'area o l'ingrandimento.`);
     }
 
     const totalTicks = sequenceTotalTicks(sequence);
@@ -1594,101 +1612,82 @@ async function renderExportFrames({ fps, scale, mode, bg, onStatus }) {
     // durata del loop in centesimi di secondo (unita' di GIF e APNG)
     const totalCs = totalTicks * 100 / 60;
 
+    return { sequence, shifts, box, scale, width, height, totalTicks, totalCs };
+}
+
+function planFrames(plan, fps) {
+
     // almeno 2 cs per fotogramma (i browser rallentano i valori piu' bassi)
     const n = Math.max(1, Math.min(
-        Math.floor(totalCs / 2),
-        Math.round(totalCs * fps / 100)
+        Math.floor(plan.totalCs / 2),
+        Math.round(plan.totalCs * fps / 100)
     ));
 
-    const frames = [];
+    // i ritardi sommano esattamente la durata del loop
     const delays = [];
 
-    let width = 0;
-    let height = 0;
-
-    const canvas = document.createElement('canvas');
-    const maskCanvas = document.createElement('canvas');
-
-    const readPixels = (cv) =>
-        cv.getContext('2d', { willReadFrequently: true })
-            .getImageData(0, 0, cv.width, cv.height).data;
-
     for (let k = 0; k < n; k++) {
-
-        const { index, t } = sampleSequence(sequence, k * totalTicks / n);
-
-        const pieces = composeFrame({
-            sequence,
-            framesDB: state.framesDB,
-            shifts,
-            index,
-            t,
-            smooth: state.smooth
-        }) || [];
-
-        /*
-            GIF: i colori si calcolano sempre sopra il colore di sfondo
-            scelto, cosi' i pixel semitrasparenti (ombra, bagliori) non
-            diventano pieni; con lo sfondo trasparente si toglie solo
-            ai pixel quasi vuoti.
-        */
-
-        if (mode === 'gif' || mode === 'gif-mask') {
-
-            Renderer.renderToCanvas(pieces, box, scale, bg, canvas);
-
-            width = canvas.width;
-            height = canvas.height;
-
-            const data = readPixels(canvas);
-
-            if (mode === 'gif-mask') {
-
-                Renderer.renderToCanvas(pieces, box, scale, null, maskCanvas);
-
-                const mask = readPixels(maskCanvas);
-
-                for (let p = 3; p < data.length; p += 4) {
-                    data[p] = mask[p] >= 128 ? 255 : 0;
-                }
-            }
-
-            frames.push(data);
-
-        } else {
-
-            Renderer.renderToCanvas(pieces, box, scale, null, canvas);
-
-            width = canvas.width;
-            height = canvas.height;
-
-            if (mode === 'alpha') {
-
-                frames.push(readPixels(canvas));
-
-            } else {
-
-                const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
-
-                frames.push(new Uint8Array(await blob.arrayBuffer()));
-            }
-        }
-
-        // i ritardi sommano esattamente la durata del loop
-        delays.push(
-            Math.round((k + 1) * totalCs / n) -
-            Math.round(k * totalCs / n)
-        );
-
-        if (k % 4 === 0) {
-
-            onStatus(`Creo i fotogrammi… ${k + 1}/${n}`);
-
-            await pause0();
-        }
+        delays.push(Math.round((k + 1) * plan.totalCs / n) - Math.round(k * plan.totalCs / n));
     }
 
-    return { frames, delays, width, height };
+    plan.n = n;
+    plan.delays = delays;
+
+    return plan;
+}
+
+function framePieces(plan, k) {
+
+    const { index, t } = sampleSequence(plan.sequence, k * plan.totalTicks / plan.n);
+
+    return composeFrame({
+        sequence: plan.sequence,
+        framesDB: state.framesDB,
+        shifts: plan.shifts,
+        index,
+        t,
+        smooth: state.smooth
+    }) || [];
+}
+
+const readPixels = (cv) =>
+    cv.getContext('2d', { willReadFrequently: true })
+        .getImageData(0, 0, cv.width, cv.height).data;
+
+/*
+    Pixel RGBA del fotogramma k (un solo buffer: dopo l'uso si butta).
+    GIF: i colori si calcolano sopra il colore di sfondo scelto, cosi'
+    i pixel semitrasparenti (ombra, bagliori) non diventano pieni; con
+    lo sfondo trasparente si toglie solo ai pixel quasi vuoti.
+*/
+
+function framePixels(plan, k, mode, bg, canvas, maskCanvas) {
+
+    const pieces = framePieces(plan, k);
+
+    if (mode === 'gif' || mode === 'gif-mask') {
+
+        Renderer.renderToCanvas(pieces, plan.box, plan.scale, bg, canvas);
+
+        const data = readPixels(canvas);
+
+        if (mode === 'gif-mask') {
+
+            Renderer.renderToCanvas(pieces, plan.box, plan.scale, null, maskCanvas);
+
+            const mask = readPixels(maskCanvas);
+
+            for (let p = 3; p < data.length; p += 4) {
+                data[p] = mask[p] >= 128 ? 255 : 0;
+            }
+        }
+
+        return data;
+    }
+
+    Renderer.renderToCanvas(pieces, plan.box, plan.scale, null, canvas);
+
+    return readPixels(canvas);
 }
 
 
@@ -1759,7 +1758,7 @@ async function runExport(button, job) {
 
     const label = button.innerText;
 
-    const exportButtons = [btnGif, btnApng, btnZip, btnVideo];
+    const exportButtons = [btnGif, btnApng, btnZip, btnVideo, btnMov];
 
     exportButtons.forEach(b => b.disabled = true);
 
@@ -1798,25 +1797,52 @@ async function runExport(button, job) {
 
 
 // ---- GIF ----
+//
+// La GIF ha una sola palette per tutti i fotogrammi: prima passata =
+// solo l'istogramma dei colori (su al massimo 120 fotogrammi sparsi:
+// i colori di un'unita' si ripetono), seconda passata = codifica.
 
 btnGif.onclick = () => runExport(btnGif, async (o) => {
 
-    const { frames, delays, width, height } = await renderExportFrames({
-        fps: o.fps,
-        scale: o.scale,
-        mode: o.transparent ? 'gif-mask' : 'gif',
-        bg: o.bg,
-        onStatus: o.onStatus
+    const plan = planFrames(exportPlan(o.scale), o.fps);
+    const mode = o.transparent ? 'gif-mask' : 'gif';
+
+    const canvas = document.createElement('canvas');
+    const maskCanvas = document.createElement('canvas');
+
+    const pb = createPaletteBuilder();
+
+    const samples = Math.min(plan.n, 120);
+
+    for (let s = 0; s < samples; s++) {
+
+        const k = Math.floor(s * plan.n / samples);
+
+        pb.add(framePixels(plan, k, mode, o.bg, canvas, maskCanvas));
+
+        if (s % 4 === 0) {
+            o.onStatus(`Analizzo i colori… ${s + 1}/${samples}`);
+            await pause0();
+        }
+    }
+
+    const gw = createGifWriter(plan.width, plan.height, {
+        ...pb.finish(o.transparent),
+        transparent: o.transparent
     });
 
-    o.onStatus('Comprimo…');
+    for (let k = 0; k < plan.n; k++) {
 
-    await pause0();
+        gw.addFrame(framePixels(plan, k, mode, o.bg, canvas, maskCanvas), plan.delays[k]);
 
-    const bytes = encodeGIF(frames, width, height, { transparent: o.transparent, delays });
+        if (k % 2 === 0) {
+            o.onStatus(`Creo la GIF… ${k + 1}/${plan.n}`);
+            await pause0();
+        }
+    }
 
     await saveFile(
-        new Blob([bytes], { type: 'image/gif' }),
+        gw.finish(),
         `${fileLabel()}.gif`, 'GIF animata', 'image/gif', '.gif'
     );
 });
@@ -1826,32 +1852,34 @@ btnGif.onclick = () => runExport(btnGif, async (o) => {
 
 btnApng.onclick = () => runExport(btnApng, async (o) => {
 
-    const { frames, delays, width, height } = await renderExportFrames({
-        fps: o.fps,
-        scale: o.scale,
-        mode: 'alpha',
-        bg: null,
-        onStatus: o.onStatus
-    });
+    const plan = planFrames(exportPlan(o.scale), o.fps);
 
-    const bytes = await encodeAPNG(frames, width, height, {
-        delays,
-        onProgress: async (i, total) => {
+    const canvas = document.createElement('canvas');
 
-            o.onStatus(`Comprimo… ${i}/${total}`);
+    const aw = createAPNGWriter(plan.width, plan.height, plan.n);
 
+    for (let k = 0; k < plan.n; k++) {
+
+        await aw.addFrame(framePixels(plan, k, 'alpha', null, canvas), plan.delays[k]);
+
+        if (k % 2 === 0) {
+            o.onStatus(`Creo l'APNG… ${k + 1}/${plan.n}`);
             await pause0();
         }
-    });
+    }
 
     await saveFile(
-        new Blob([bytes], { type: 'image/png' }),
+        aw.finish(),
         `${fileLabel()}.png`, 'PNG animato (APNG)', 'image/png', '.png'
     );
 });
 
 
 // ---- VIDEO WebM (registrato in tempo reale dal canvas) ----
+//
+// Nessun fotogramma preparato in anticipo: ognuno si disegna nel
+// momento in cui va mostrato (e' veloce), quindi la memoria non
+// dipende dalla durata.
 
 btnVideo.onclick = () => runExport(btnVideo, async (o) => {
 
@@ -1861,20 +1889,14 @@ btnVideo.onclick = () => runExport(btnVideo, async (o) => {
 
     const transparent = document.getElementById('videoTransparent').checked;
 
-    const { frames, delays, width, height } = await renderExportFrames({
-        fps: o.fps,
-        scale: o.scale,
-        mode: transparent ? 'alpha' : 'gif',
-        bg: o.bg,
-        onStatus: o.onStatus
-    });
+    const plan = planFrames(exportPlan(o.scale), o.fps);
+    const { width, height, delays } = plan;
 
-    // fotogrammi pronti come immagini (disegnarli e' istantaneo)
-    const bitmaps = [];
-
-    for (const data of frames) {
-        bitmaps.push(await createImageBitmap(new ImageData(data, width, height)));
-    }
+    // canvas di lavoro con accelerazione grafica (non viene letto)
+    const work = document.createElement('canvas');
+    work.width = width;
+    work.height = height;
+    work.getContext('2d');
 
     const cv = document.createElement('canvas');
 
@@ -1883,9 +1905,7 @@ btnVideo.onclick = () => runExport(btnVideo, async (o) => {
 
     const ctx = cv.getContext('2d');
 
-    const types = transparent
-        ? ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm']
-        : ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
+    const types = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm'];
 
     const mime = types.find(t => MediaRecorder.isTypeSupported(t));
 
@@ -1909,16 +1929,18 @@ btnVideo.onclick = () => runExport(btnVideo, async (o) => {
     // almeno 3 secondi: il video si ripete finche' non li raggiunge
     const loops = Math.max(1, Math.ceil(3000 / loopMs));
 
-    const draw = (i) => {
+    const draw = (k) => {
+
+        Renderer.renderToCanvas(framePieces(plan, k), plan.box, plan.scale, transparent ? null : o.bg, work);
 
         ctx.clearRect(0, 0, width, height);
 
-        ctx.drawImage(bitmaps[i], 0, 0);
+        ctx.drawImage(work, 0, 0);
 
         if (track.requestFrame) track.requestFrame();
     };
 
-    rec.start();
+    rec.start(1000);           // consegna i dati ogni secondo invece che tutti alla fine
 
     draw(0);
 
@@ -1937,7 +1959,7 @@ btnVideo.onclick = () => runExport(btnVideo, async (o) => {
                 return;
             }
 
-            // frame corrente in base al tempo trascorso nel loop
+            // fotogramma corrente in base al tempo trascorso nel loop
             let local = el % loopMs;
             let i = 0;
 
@@ -1946,7 +1968,7 @@ btnVideo.onclick = () => runExport(btnVideo, async (o) => {
                 i++;
             }
 
-            const key = Math.floor(el / loopMs) * 1000 + i;
+            const key = Math.floor(el / loopMs) * 100000 + i;
 
             if (key !== shown) {
                 shown = key;
@@ -1976,33 +1998,75 @@ btnVideo.onclick = () => runExport(btnVideo, async (o) => {
 });
 
 
+// ---- MOV Apple ProRes 4444 con trasparenza ----
+//
+// Codifica nel browser, un fotogramma alla volta (memoria costante).
+// Il file si apre in QuickTime / Final Cut / Motion; sul Mac si
+// converte in HEVC trasparente per Safari e iPhone (vedi riquadro).
+
+btnMov.onclick = () => runExport(btnMov, async (o) => {
+
+    const plan = planFrames(exportPlan(o.scale), o.fps);
+
+    const canvas = document.createElement('canvas');
+
+    const enc = createProResEncoder(plan.width, plan.height, { quant: 2 });
+    const mov = createMovWriter(plan.width, plan.height);
+
+    const t0 = performance.now();
+
+    for (let k = 0; k < plan.n; k++) {
+
+        mov.addFrame(
+            enc.encodeFrame(framePixels(plan, k, 'alpha', null, canvas)),
+            plan.delays[k] * 10
+        );
+
+        const left = (performance.now() - t0) / (k + 1) * (plan.n - k - 1) / 1000;
+
+        o.onStatus(`Creo il MOV… ${k + 1}/${plan.n}` + (k > 2 ? ` (~${Math.ceil(left)} s)` : ''));
+
+        await pause0();
+    }
+
+    await saveFile(
+        mov.finish(),
+        `${fileLabel()}.mov`, 'Video QuickTime (ProRes 4444)', 'video/quicktime', '.mov'
+    );
+});
+
+
 // ---- ZIP con un PNG trasparente per fotogramma ----
 
 btnZip.onclick = () => runExport(btnZip, async (o) => {
 
-    const { frames } = await renderExportFrames({
-        fps: o.fps,
-        scale: o.scale,
-        mode: 'png',
-        bg: null,
-        onStatus: o.onStatus
-    });
+    const plan = planFrames(exportPlan(o.scale), o.fps);
 
-    o.onStatus('Creo lo ZIP…');
+    const canvas = document.createElement('canvas');
 
-    await pause0();
+    const zip = createZipWriter();
 
-    const digits = Math.max(4, String(frames.length).length);
+    const digits = Math.max(4, String(plan.n).length);
 
-    const bytes = encodeZip(
-        frames.map((data, i) => ({
-            name: `${fileLabel()}_${String(i + 1).padStart(digits, '0')}.png`,
-            data
-        }))
-    );
+    for (let k = 0; k < plan.n; k++) {
+
+        Renderer.renderToCanvas(framePieces(plan, k), plan.box, plan.scale, null, canvas);
+
+        const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+
+        zip.addFile(
+            `${fileLabel()}_${String(k + 1).padStart(digits, '0')}.png`,
+            new Uint8Array(await blob.arrayBuffer())
+        );
+
+        if (k % 2 === 0) {
+            o.onStatus(`Creo i PNG… ${k + 1}/${plan.n}`);
+            await pause0();
+        }
+    }
 
     await saveFile(
-        new Blob([bytes], { type: 'application/zip' }),
+        zip.finish(),
         `${fileLabel()}_frames.zip`, 'ZIP di PNG', 'application/zip', '.zip'
     );
 });
@@ -2117,3 +2181,6 @@ function gameLoop(timestamp) {
         renderCurrentFrame();
     }
 }
+
+
+initAssembler();

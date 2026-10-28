@@ -24,6 +24,9 @@
                 <label class="custom-file-upload">
                     <input type="file" id="cgg" accept=".csv,.cgg"> 📤 Carica Struttura (CGG)
                 </label>
+                <button id="openAssembler" class="secondary-btn" style="width:100%;margin-top:6px"
+                    title="Per le unità senza file CGG: costruisci i frame a mano dallo sheet">🛠 Non ho il CGG:
+                    costruiscilo</button>
             </div>
 
             <div class="upload-group">
@@ -204,6 +207,30 @@
                         style="background: linear-gradient(135deg, #ef4444, #b91c1c);">
                         🎬 ESPORTA VIDEO (WebM)
                     </button>
+                    <button id="downloadMov" class="primary-btn"
+                        title="Video .mov Apple ProRes 4444 con trasparenza vera: QuickTime, Final Cut, Motion, iMovie. Sul Mac diventa HEVC trasparente (per Safari / iPhone) con un clic destro."
+                        style="background: linear-gradient(135deg, #6b7280, #111827);">
+                        🍎 ESPORTA MOV APPLE (trasparente)
+                    </button>
+                    <details
+                        style="font-size:12px;color:#9ca3af;background:#12151b;border:1px solid #2e3340;border-radius:6px;padding:8px">
+                        <summary style="cursor:pointer;color:#d1d5db">Video trasparente per Safari / iPhone (HEVC)
+                        </summary>
+                        <div style="margin-top:6px;line-height:1.5">
+                            Il .mov esportato è ProRes 4444 con trasparenza. Per Safari, iPhone e iPad va
+                            trasformato in HEVC, una volta sola, su un Mac:<br>
+                            <b>1.</b> clic destro sul file .mov nel Finder<br>
+                            <b>2.</b> Servizi (o Azioni rapide) → <b>Codifica file video selezionati</b><br>
+                            <b>3.</b> Impostazione <b>HEVC 1080p</b> (o 4K) e spunta <b>Mantieni trasparenza</b><br>
+                            Nella pagina web:<br>
+                            <code style="color:#facc15;white-space:pre-wrap">&lt;video autoplay loop muted playsinline&gt;
+  &lt;source src="idle-hevc.mov" type="video/quicktime; codecs=hvc1.1.6.H120.b0"&gt;
+  &lt;source src="idle.webm" type="video/webm; codecs=vp09.00.41.08"&gt;
+&lt;/video&gt;</code><br>
+                            L'HEVC va <b>prima</b>: Safari prende quello (trasparente), Chrome / Firefox /
+                            Android il WebM.
+                        </div>
+                    </details>
                     <button id="downloadApng" class="primary-btn"
                         title="PNG animato con trasparenza vera (ombra e bagliori morbidi). Si apre nei browser e in molti programmi; non e' un video."
                         style="background: linear-gradient(135deg, #8b5cf6, #6d28d9);">
@@ -221,6 +248,107 @@
         <main class="canvas-container">
             <canvas id="cv"></canvas>
         </main>
+    </div>
+
+    <div id="asmOverlay" class="asm-overlay" style="display:none">
+        <div class="asm-top">
+            <b>🛠 Costruisci CGG</b>
+            <button id="asmPrev" class="secondary-btn">⬅</button>
+            <input type="number" id="asmFrameNum" min="0" value="0" style="width:56px">
+            <button id="asmNext" class="secondary-btn">➡</button>
+            <span id="asmFrameLabel" style="color:#9ca3af"></span>
+            <span style="flex:1"></span>
+            <select id="asmSeq" title="Lavora solo sui frame usati da questa animazione">
+                <option value="idle">Idle</option>
+                <option value="move">Move</option>
+                <option value="atk">Attack</option>
+                <option value="all">Tutti i frame</option>
+            </select>
+            <button id="asmPlay" class="secondary-btn">▶ Anteprima</button>
+            <button id="asmExport" class="secondary-btn">💾 Esporta CGG</button>
+            <label class="secondary-btn" style="cursor:pointer">📂 Importa CGG<input type="file" id="asmImport"
+                    accept=".csv,.cgg" style="display:none"></label>
+            <button id="asmUse" class="primary-btn" style="width:auto;padding:8px 14px">✔ Usa nell'animatore</button>
+            <button id="asmClose" class="secondary-btn">✖</button>
+        </div>
+        <div id="asmStrip" class="asm-strip"
+            title="Frame dell'animazione scelta: posizione · #numero nel CGG. Attenzione: un frame usato anche da un'altra animazione cambia anche lì.">
+        </div>
+        <div class="asm-body">
+            <div class="asm-left">
+                <div class="asm-help">Clicca un pezzo dello sheet per aggiungerlo al frame. <b>Shift+trascina</b> =
+                    nuovo pezzo manuale, <b>tasto destro</b> = elimina rettangolo.</div>
+                <div style="display:flex;gap:6px;align-items:center;font-size:12px">
+                    Unisci distanza <input type="number" id="asmGap" min="0" max="6" value="0" style="width:46px">
+                    <button id="asmRedetect" class="secondary-btn">Rileva di nuovo</button>
+                </div>
+                <div class="asm-sheetwrap"><canvas id="asmSheet"></canvas></div>
+            </div>
+            <div class="asm-center"><canvas id="asmCanvas"></canvas></div>
+            <div class="asm-right">
+                <div class="asm-help">Trascina i pezzi · frecce = 1 px (Shift 5) · Q/E ruota · [ ] livello · Canc
+                    elimina · , . cambia frame · rotella = zoom · Alt+rotella = ruota · <b>tasto destro o centrale</b>
+                    trascinato = sposta vista</div>
+                <label><input type="checkbox" id="asmOnion" checked> Frame precedente in trasparenza</label>
+                <label><input type="checkbox" id="asmGrid" checked> Griglia e croce (0,0)</label>
+                <div style="display:flex;gap:6px;flex-wrap:wrap">
+                    <button id="asmCopyPrev" class="secondary-btn">Copia dal precedente</button>
+                    <button id="asmCopyFrom" class="secondary-btn">Copia da</button>
+                    <input type="number" id="asmCopySrc" min="0" value="0" style="width:50px">
+                    <button id="asmClear" class="secondary-btn">Svuota frame</button>
+                </div>
+                <div class="asm-selbar">
+                    <span id="asmSelCount" style="color:#9ca3af;font-size:12px;flex:1"></span>
+                    <button id="asmSelAll" class="secondary-btn" title="Ctrl+A">Tutti</button>
+                    <button id="asmSelNone" class="secondary-btn" title="Esc">Nessuno</button>
+                    <button id="asmDelSel" class="secondary-btn danger" title="Canc">🗑 Elimina selezionati</button>
+                </div>
+                <div class="asm-selbar">
+                    <button id="asmCopy" class="secondary-btn" title="Ctrl+C">📋 Copia</button>
+                    <button id="asmCut" class="secondary-btn" title="Ctrl+X">✂ Taglia</button>
+                    <button id="asmPaste" class="secondary-btn"
+                        title="Ctrl+V: incolla sopra a tutto, nelle stesse coordinate. Ctrl+Shift+V (o Shift+clic): incolla sotto a tutto">📥
+                        Incolla</button>
+                </div>
+                <div class="asm-selbar">
+                    <button id="asmGroup" class="secondary-btn" title="Ctrl+G">🔗 Raggruppa</button>
+                    <button id="asmUngroup" class="secondary-btn" title="Ctrl+Shift+G">⛓ Separa</button>
+                    <span style="font-size:11px;color:#9ca3af">Alt+clic = un solo pezzo del gruppo</span>
+                </div>
+                <div class="asm-help">Clic = un pezzo · <b>Ctrl+clic</b> = aggiungi/togli · <b>Shift+clic</b> = da… a…
+                    · nel frame: <b>trascina sul vuoto</b> = rettangolo di selezione (Alt = anche i pezzi solo
+                    toccati)</div>
+                <div id="asmList" class="asm-list"></div>
+                <div id="asmPiece" class="asm-piece">
+                    <div id="asmPieceInfo" style="font-size:12px;color:#9ca3af"></div>
+                    <label>X <input type="number" id="asmP_x"></label>
+                    <label>Y <input type="number" id="asmP_y"></label>
+                    <label>Rotazione <input type="number" id="asmP_rotate"></label>
+                    <div style="display:flex;gap:4px;align-items:center">
+                        <button id="asmRotM" class="secondary-btn">⟲</button>
+                        <input type="number" id="asmStep" value="5" style="width:50px">
+                        <button id="asmRotP" class="secondary-btn">⟳</button>
+                    </div>
+                    <label>Opacità % <input type="number" id="asmP_opacity" min="0" max="100"></label>
+                    <label>Specchio <select id="asmP_flipType">
+                            <option value="0">no</option>
+                            <option value="1">orizzontale</option>
+                            <option value="2">verticale</option>
+                            <option value="3">entrambi</option>
+                        </select></label>
+                    <label>Fusione <select id="asmP_blendMode">
+                            <option value="0">normale</option>
+                            <option value="1">additiva (luce)</option>
+                        </select></label>
+                    <div style="display:flex;gap:4px;flex-wrap:wrap">
+                        <button id="asmFront" class="secondary-btn">Avanti</button>
+                        <button id="asmBack" class="secondary-btn">Indietro</button>
+                        <button id="asmDup" class="secondary-btn">Duplica</button>
+                        <button id="asmDel" class="secondary-btn">Elimina</button>
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
     <script type="module" src="main.js"></script>
 </body>

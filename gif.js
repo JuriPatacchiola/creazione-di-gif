@@ -125,16 +125,20 @@ function lzwEncode(indices, minCodeSize) {
 
 // ------------------------------------------------------------
 // Palette (median cut su istogramma a 5 bit per canale)
+//
+// Si costruisce UN FOTOGRAMMA ALLA VOLTA: add(rgba) accumula solo
+// l'istogramma (32768 caselle, pochi KB), poi i pixel si possono
+// buttare. Cosi' la memoria non cresce con la lunghezza.
 // ------------------------------------------------------------
 
-function buildPalette(frames, transparent) {
+export function createPaletteBuilder() {
 
     const count = new Float64Array(32768);
     const sumR = new Float64Array(32768);
     const sumG = new Float64Array(32768);
     const sumB = new Float64Array(32768);
 
-    for (const data of frames) {
+    function add(data) {
 
         for (let p = 0; p < data.length; p += 4) {
 
@@ -153,163 +157,190 @@ function buildPalette(frames, transparent) {
         }
     }
 
-    const keys = [];
+    function finish(transparent) {
 
-    for (let k = 0; k < 32768; k++) {
-        if (count[k] > 0) keys.push(k);
-    }
+        const keys = [];
 
-    const maxColors = transparent ? 255 : 256;
-
-    const total = (list) => {
-        let t = 0;
-        for (const k of list) t += count[k];
-        return t;
-    };
-
-    const ranges = (list) => {
-
-        let r0 = 31, r1 = 0, g0 = 31, g1 = 0, b0 = 31, b1 = 0;
-
-        for (const k of list) {
-
-            const r = k >> 10, g = (k >> 5) & 31, b = k & 31;
-
-            if (r < r0) r0 = r; if (r > r1) r1 = r;
-            if (g < g0) g0 = g; if (g > g1) g1 = g;
-            if (b < b0) b0 = b; if (b > b1) b1 = b;
+        for (let k = 0; k < 32768; k++) {
+            if (count[k] > 0) keys.push(k);
         }
 
-        return [r1 - r0, g1 - g0, b1 - b0];
-    };
+        const maxColors = transparent ? 255 : 256;
 
-    let boxes = keys.length ? [keys] : [];
+        const total = (list) => {
+            let t = 0;
+            for (const k of list) t += count[k];
+            return t;
+        };
 
-    while (boxes.length < maxColors) {
+        const ranges = (list) => {
 
-        // scelgo la scatola con piu' pixel e piu' ampia
-        let pick = -1, best = -1, pickRanges = null;
+            let r0 = 31, r1 = 0, g0 = 31, g1 = 0, b0 = 31, b1 = 0;
 
-        for (let i = 0; i < boxes.length; i++) {
+            for (const k of list) {
 
-            if (boxes[i].length < 2) continue;
+                const r = k >> 10, g = (k >> 5) & 31, b = k & 31;
 
-            const rg = ranges(boxes[i]);
-            const score = total(boxes[i]) * (1 + Math.max(rg[0], rg[1], rg[2]));
+                if (r < r0) r0 = r; if (r > r1) r1 = r;
+                if (g < g0) g0 = g; if (g > g1) g1 = g;
+                if (b < b0) b0 = b; if (b > b1) b1 = b;
+            }
 
-            if (score > best) {
-                best = score;
-                pick = i;
-                pickRanges = rg;
+            return [r1 - r0, g1 - g0, b1 - b0];
+        };
+
+        let boxes = keys.length ? [keys] : [];
+
+        while (boxes.length < maxColors) {
+
+            // scelgo la scatola con piu' pixel e piu' ampia
+            let pick = -1, best = -1, pickRanges = null;
+
+            for (let i = 0; i < boxes.length; i++) {
+
+                if (boxes[i].length < 2) continue;
+
+                const rg = ranges(boxes[i]);
+                const score = total(boxes[i]) * (1 + Math.max(rg[0], rg[1], rg[2]));
+
+                if (score > best) {
+                    best = score;
+                    pick = i;
+                    pickRanges = rg;
+                }
+            }
+
+            if (pick < 0) break;
+
+            const box = boxes[pick];
+
+            const ch = pickRanges[0] >= pickRanges[1] && pickRanges[0] >= pickRanges[2]
+                ? 0
+                : (pickRanges[1] >= pickRanges[2] ? 1 : 2);
+
+            const val = (k) => ch === 0 ? (k >> 10) : (ch === 1 ? ((k >> 5) & 31) : (k & 31));
+
+            box.sort((a, b) => val(a) - val(b));
+
+            const half = total(box) / 2;
+
+            let acc = 0, cut = 1;
+
+            for (let i = 0; i < box.length - 1; i++) {
+
+                acc += count[box[i]];
+                cut = i + 1;
+
+                if (acc >= half) break;
+            }
+
+            boxes.splice(pick, 1, box.slice(0, cut), box.slice(cut));
+        }
+
+        const offset = transparent ? 1 : 0;
+
+        const palette = new Uint8Array(256 * 3);
+        const lut = new Uint8Array(32768);
+
+        boxes.forEach((box, i) => {
+
+            let n = 0, r = 0, g = 0, b = 0;
+
+            for (const k of box) {
+
+                n += count[k];
+                r += sumR[k];
+                g += sumG[k];
+                b += sumB[k];
+
+                lut[k] = i + offset;
+            }
+
+            palette[(i + offset) * 3] = Math.round(r / n);
+            palette[(i + offset) * 3 + 1] = Math.round(g / n);
+            palette[(i + offset) * 3 + 2] = Math.round(b / n);
+        });
+
+        // colori mai visti nei fotogrammi analizzati (es. un lampo in
+        // un fotogramma non campionato): il colore piu' vicino della palette
+        const nColors = boxes.length;
+
+        if (nColors) {
+
+            for (let k = 0; k < 32768; k++) {
+
+                if (count[k] > 0) continue;
+
+                const r = ((k >> 10) << 3) + 4, g = (((k >> 5) & 31) << 3) + 4, b = ((k & 31) << 3) + 4;
+
+                let best = 0, bestD = Infinity;
+
+                for (let i = 0; i < nColors; i++) {
+
+                    const o = (i + offset) * 3;
+                    const dr = palette[o] - r, dg = palette[o + 1] - g, db = palette[o + 2] - b;
+                    const d = dr * dr * 2 + dg * dg * 4 + db * db * 3;
+
+                    if (d < bestD) { bestD = d; best = i; }
+                }
+
+                lut[k] = best + offset;
             }
         }
 
-        if (pick < 0) break;
-
-        const box = boxes[pick];
-
-        const ch = pickRanges[0] >= pickRanges[1] && pickRanges[0] >= pickRanges[2]
-            ? 0
-            : (pickRanges[1] >= pickRanges[2] ? 1 : 2);
-
-        const val = (k) => ch === 0 ? (k >> 10) : (ch === 1 ? ((k >> 5) & 31) : (k & 31));
-
-        box.sort((a, b) => val(a) - val(b));
-
-        const half = total(box) / 2;
-
-        let acc = 0, cut = 1;
-
-        for (let i = 0; i < box.length - 1; i++) {
-
-            acc += count[box[i]];
-            cut = i + 1;
-
-            if (acc >= half) break;
-        }
-
-        boxes.splice(pick, 1, box.slice(0, cut), box.slice(cut));
+        return { palette, lut };
     }
 
-    const offset = transparent ? 1 : 0;
-
-    const palette = new Uint8Array(256 * 3);
-    const lut = new Uint8Array(32768);
-
-    boxes.forEach((box, i) => {
-
-        let n = 0, r = 0, g = 0, b = 0;
-
-        for (const k of box) {
-
-            n += count[k];
-            r += sumR[k];
-            g += sumG[k];
-            b += sumB[k];
-
-            lut[k] = i + offset;
-        }
-
-        palette[(i + offset) * 3] = Math.round(r / n);
-        palette[(i + offset) * 3 + 1] = Math.round(g / n);
-        palette[(i + offset) * 3 + 2] = Math.round(b / n);
-    });
-
-    return { palette, lut };
+    return { add, finish };
 }
 
 
 // ------------------------------------------------------------
-// API
-// frames: array di Uint8ClampedArray RGBA (tutti width*height)
-// delays: centesimi di secondo per ogni frame
+// SCRITTURA A FLUSSO
+//
+// addFrame(rgba, delay) codifica subito il fotogramma e tiene solo i
+// byte compressi (in un Blob: il browser puo' anche parcheggiarli su
+// disco). finish() restituisce il file finale come Blob.
 // ------------------------------------------------------------
 
-export function encodeGIF(frames, width, height, options = {}) {
+export function createGifWriter(width, height, { palette, lut, transparent = false, loop = 0 }) {
 
-    const transparent = !!options.transparent;
-    const loop = options.loop === undefined ? 0 : options.loop;
-    const delays = options.delays || frames.map(() => 4);
+    const parts = [];
 
-    if (!frames.length) throw new Error('Nessun frame da codificare.');
+    const head = new ByteWriter();
 
-    const { palette, lut } = buildPalette(frames, transparent);
-
-    const w = new ByteWriter();
-
-    w.ascii('GIF89a');
-    w.word(width);
-    w.word(height);
-    w.byte(0xF7);              // tabella globale, 256 colori
-    w.byte(0);                 // colore di sfondo
-    w.byte(0);                 // aspect ratio
-    w.bytes(palette);
+    head.ascii('GIF89a');
+    head.word(width);
+    head.word(height);
+    head.byte(0xF7);              // tabella globale, 256 colori
+    head.byte(0);                 // colore di sfondo
+    head.byte(0);                 // aspect ratio
+    head.bytes(palette);
 
     // loop infinito
-    w.byte(0x21); w.byte(0xFF); w.byte(11);
-    w.ascii('NETSCAPE2.0');
-    w.byte(3); w.byte(1); w.word(loop); w.byte(0);
+    head.byte(0x21); head.byte(0xFF); head.byte(11);
+    head.ascii('NETSCAPE2.0');
+    head.byte(3); head.byte(1); head.word(loop); head.byte(0);
+
+    parts.push(head.result());
 
     const indices = new Uint8Array(width * height);
 
-    frames.forEach((data, f) => {
+    function addFrame(data, delay = 4) {
 
         for (let p = 0, i = 0; p < data.length; p += 4, i++) {
 
-            if (data[p + 3] < 128) {
-
-                indices[i] = 0;                 // trasparente (se non e' attiva, indice 0 e' un colore qualsiasi: non succede)
-
-            } else {
-
-                indices[i] = lut[((data[p] >> 3) << 10) | ((data[p + 1] >> 3) << 5) | (data[p + 2] >> 3)];
-            }
+            indices[i] = data[p + 3] < 128
+                ? 0
+                : lut[((data[p] >> 3) << 10) | ((data[p + 1] >> 3) << 5) | (data[p + 2] >> 3)];
         }
+
+        const w = new ByteWriter();
 
         // Graphic Control Extension
         w.byte(0x21); w.byte(0xF9); w.byte(4);
         w.byte((transparent ? 2 : 1) << 2 | (transparent ? 1 : 0));   // disposal: 2 = ripristina sfondo, 1 = lascia
-        w.word(Math.max(2, delays[f] || 4));
+        w.word(Math.max(2, delay || 4));
         w.byte(0);                                                      // indice trasparente
         w.byte(0);
 
@@ -332,9 +363,37 @@ export function encodeGIF(frames, width, height, options = {}) {
         }
 
         w.byte(0);
-    });
 
-    w.byte(0x3B);
+        parts.push(new Blob([w.result()]));
+    }
 
-    return w.result();
+    function finish() {
+        parts.push(new Uint8Array([0x3B]));
+        return new Blob(parts, { type: 'image/gif' });
+    }
+
+    return { addFrame, finish };
+}
+
+
+// ------------------------------------------------------------
+// API vecchia (tutti i frame in memoria): resta per compatibilita'
+// frames: array di Uint8ClampedArray RGBA (tutti width*height)
+// delays: centesimi di secondo per ogni frame
+// ------------------------------------------------------------
+
+export async function encodeGIF(frames, width, height, options = {}) {
+
+    const transparent = !!options.transparent;
+    const delays = options.delays || frames.map(() => 4);
+
+    if (!frames.length) throw new Error('Nessun frame da codificare.');
+
+    const pb = createPaletteBuilder();
+    frames.forEach(f => pb.add(f));
+
+    const gw = createGifWriter(width, height, { ...pb.finish(transparent), transparent, loop: options.loop || 0 });
+    frames.forEach((f, i) => gw.addFrame(f, delays[i]));
+
+    return new Uint8Array(await gw.finish().arrayBuffer());
 }

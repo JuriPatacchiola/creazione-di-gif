@@ -228,3 +228,134 @@ export function encodeZip(files) {
 
     return concat([...local, centralBytes, end]);
 }
+
+
+// ============================================================
+// VERSIONI A FLUSSO (un fotogramma alla volta)
+//
+// Ogni fotogramma viene compresso appena arriva e si tiene solo il
+// risultato compresso (dentro un Blob, che il browser puo' anche
+// spostare su disco). La memoria non cresce con la lunghezza.
+// ============================================================
+
+export function createAPNGWriter(width, height, numFrames, { loop = 0 } = {}) {
+
+    const parts = [
+        new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+        chunk('IHDR', new Uint8Array([...u32(width), ...u32(height), 8, 6, 0, 0, 0])),
+        chunk('acTL', new Uint8Array([...u32(numFrames), ...u32(loop)]))
+    ];
+
+    let seq = 0;
+    let f = 0;
+
+    async function addFrame(rgba, delayCs) {
+
+        if (f >= numFrames) throw new Error('APNG: troppi fotogrammi');
+
+        const cs = Math.max(1, Math.round(delayCs || 4));
+
+        const ctl = chunk('fcTL', new Uint8Array([
+            ...u32(seq++),
+            ...u32(width), ...u32(height),
+            ...u32(0), ...u32(0),
+            (cs * 10) >> 8, (cs * 10) & 255,
+            1000 >> 8, 1000 & 255,
+            0,      // dispose: nessuna
+            0       // blend: SOURCE
+        ]));
+
+        const z = await deflate(filterRows(rgba, width, height));
+
+        const data = f === 0
+            ? chunk('IDAT', z)
+            : chunk('fdAT', concat([new Uint8Array(u32(seq++)), z]));
+
+        parts.push(new Blob([ctl, data]));
+
+        f++;
+    }
+
+    function finish() {
+        if (f !== numFrames) throw new Error(`APNG: attesi ${numFrames} fotogrammi, arrivati ${f}`);
+        parts.push(chunk('IEND', new Uint8Array(0)));
+        return new Blob(parts, { type: 'image/png' });
+    }
+
+    return { addFrame, finish };
+}
+
+
+export function createZipWriter() {
+
+    const enc = new TextEncoder();
+    const parts = [];
+    const central = [];
+
+    let offset = 0;
+    let count = 0;
+
+    function addFile(fileName, data) {
+
+        const name = enc.encode(fileName);
+        const crc = crc32(data);
+
+        const h = new Uint8Array(30 + name.length);
+        const dv = new DataView(h.buffer);
+
+        dv.setUint32(0, 0x04034b50, true);
+        dv.setUint16(4, 20, true);
+        dv.setUint16(6, 0x0800, true);
+        dv.setUint16(8, 0, true);
+        dv.setUint16(10, 0, true);
+        dv.setUint16(12, 0x21, true);
+        dv.setUint32(14, crc, true);
+        dv.setUint32(18, data.length, true);
+        dv.setUint32(22, data.length, true);
+        dv.setUint16(26, name.length, true);
+        dv.setUint16(28, 0, true);
+        h.set(name, 30);
+
+        parts.push(new Blob([h, data]));
+
+        const c = new Uint8Array(46 + name.length);
+        const cv = new DataView(c.buffer);
+
+        cv.setUint32(0, 0x02014b50, true);
+        cv.setUint16(4, 20, true);
+        cv.setUint16(6, 20, true);
+        cv.setUint16(8, 0x0800, true);
+        cv.setUint16(10, 0, true);
+        cv.setUint16(12, 0, true);
+        cv.setUint16(14, 0x21, true);
+        cv.setUint32(16, crc, true);
+        cv.setUint32(20, data.length, true);
+        cv.setUint32(24, data.length, true);
+        cv.setUint16(28, name.length, true);
+        cv.setUint32(42, offset, true);
+        c.set(name, 46);
+
+        central.push(c);
+
+        offset += h.length + data.length;
+        count++;
+    }
+
+    function finish() {
+
+        const centralBytes = concat(central);
+
+        const end = new Uint8Array(22);
+        const ev = new DataView(end.buffer);
+
+        ev.setUint32(0, 0x06054b50, true);
+        ev.setUint16(8, count, true);
+        ev.setUint16(10, count, true);
+        ev.setUint32(12, centralBytes.length, true);
+        ev.setUint32(16, offset, true);
+
+        return new Blob([...parts, centralBytes, end], { type: 'application/zip' });
+    }
+
+    return { addFile, finish };
+}
